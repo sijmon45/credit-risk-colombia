@@ -118,8 +118,8 @@ def extract_selected_facts(
 
     path = Path(file_path)
     own_controller = controller is None
-    controller = controller or Cntlr.Cntlr()
-    model = controller.modelManager.load(str(path))
+    active_controller: Any = controller if controller is not None else Cntlr.Cntlr()
+    model = active_controller.modelManager.load(str(path))
     period = _period_from_path(path)
     rows: list[dict[str, Any]] = []
 
@@ -152,9 +152,9 @@ def extract_selected_facts(
             if is_selected:
                 rows.append(_fact_row(fact, period, path))
     finally:
-        controller.modelManager.close(model)
+        active_controller.modelManager.close(model)
         if own_controller:
-            controller.close()
+            active_controller.close()
 
     facts = pd.DataFrame(rows)
     if facts.empty:
