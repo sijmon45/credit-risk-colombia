@@ -12,6 +12,7 @@ from __future__ import annotations
 import collections
 import collections.abc
 import re
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -55,11 +56,21 @@ STOCK_TAGS = {
     "ifrs:Borrowings": "deuda_total",
 }
 
-ALL_TAGS = {**FLOW_TAGS, **STOCK_TAGS}
+TAG_ALIASES = {
+    "ifrs:CurrentBorrowingsAndCurrentPortionOfNoncurrentBorrowings": "deuda_cp",
+}
+
+PREFERRED_TAGS = {
+    "deuda_cp": "ifrs:CurrentBorrowingsAndCurrentPortionOfNoncurrentBorrowings",
+}
+
+TAG_TO_VARIABLE = {**FLOW_TAGS, **STOCK_TAGS, **TAG_ALIASES}
+ALL_TAGS = set(TAG_TO_VARIABLE)
 
 _FLOW_CONTEXT = "TrimestreAcumuladoActual"
 _STOCK_CONTEXT = "CierreTrimestreActual"
 _PERIOD_PATTERN = re.compile(r"^(?P<year>\d{4})Q(?P<quarter>[1-4])_")
+_DATE_PATTERN = re.compile(r"_(?P<date>\d{4}-\d{2}-\d{2})\.xbrl$")
 
 
 def _context_dimensions(context: Any) -> str:
@@ -87,13 +98,28 @@ def _is_valid_period_path(path: Path) -> bool:
     return True
 
 
-def _fact_row(fact: Any, period: str, source_file: Path) -> dict[str, Any]:
+def _expected_end_date(path: Path) -> datetime:
+    match = _DATE_PATTERN.search(path.name)
+    if match is None:
+        raise ValueError(
+            f"Nombre de archivo sin fecha de cierre: {path.name}."
+        )
+    reported_date = datetime.strptime(match.group("date"), "%Y-%m-%d")
+    return reported_date + timedelta(days=1)
+
+
+def _fact_row(
+    fact: Any,
+    period: str,
+    source_file: Path,
+    issuer: str,
+) -> dict[str, Any]:
     context = fact.context
     return {
-        "emisor": "ISA",
+        "emisor": issuer,
         "periodo": period,
         "tag": str(fact.concept.qname),
-        "variable": ALL_TAGS[str(fact.concept.qname)],
+        "variable": TAG_TO_VARIABLE[str(fact.concept.qname)],
         "valor_ytd_o_stock": float(fact.value),
         "unitID": fact.unitID,
         "contextID": fact.contextID,
@@ -108,6 +134,7 @@ def _fact_row(fact: Any, period: str, source_file: Path) -> dict[str, Any]:
 def extract_selected_facts(
     file_path: str | Path,
     controller: Any | None = None,
+    issuer: str = "ISA",
 ) -> pd.DataFrame:
     """Extrae un fact consolidado seleccionable por tag desde un archivo.
 
@@ -121,6 +148,7 @@ def extract_selected_facts(
     active_controller: Any = controller if controller is not None else Cntlr.Cntlr()
     model = active_controller.modelManager.load(str(path))
     period = _period_from_path(path)
+    expected_end_date = _expected_end_date(path)
     rows: list[dict[str, Any]] = []
 
     try:
@@ -137,20 +165,20 @@ def extract_selected_facts(
 
             if tag in FLOW_TAGS:
                 is_selected = (
-                    fact.contextID == _FLOW_CONTEXT
-                    and not context.isInstantPeriod
+                    not context.isInstantPeriod
                     and context.startDatetime is not None
                     and context.startDatetime.month == 1
                     and context.startDatetime.day == 1
+                    and context.endDatetime == expected_end_date
                 )
             else:
                 is_selected = (
-                    fact.contextID == _STOCK_CONTEXT
-                    and context.isInstantPeriod
+                    context.isInstantPeriod
+                    and context.endDatetime == expected_end_date
                 )
 
             if is_selected:
-                rows.append(_fact_row(fact, period, path))
+                rows.append(_fact_row(fact, period, path, issuer))
     finally:
         active_controller.modelManager.close(model)
         if own_controller:
@@ -160,8 +188,45 @@ def extract_selected_facts(
     if facts.empty:
         raise ValueError(f"No se encontraron facts seleccionables en {path.name}.")
 
-    counts = facts.groupby("tag").size()
-    missing = sorted(set(ALL_TAGS) - set(counts.index))
+    duplicate_keys = [
+        "tag",
+        "contextID",
+        "unitID",
+        "startDate",
+        "endDate",
+    ]
+    deduplicated_rows = []
+    for _, duplicate_group in facts.groupby(duplicate_keys, dropna=False, sort=False):
+        if len(duplicate_group) == 1:
+            deduplicated_rows.append(duplicate_group.iloc[0])
+            continue
+
+        non_zero = duplicate_group[duplicate_group["valor_ytd_o_stock"] != 0]
+        if len(non_zero) == 1:
+            deduplicated_rows.append(non_zero.iloc[0])
+        elif duplicate_group["valor_ytd_o_stock"].nunique() == 1:
+            deduplicated_rows.append(duplicate_group.iloc[0])
+        else:
+            raise ValueError(
+                f"Facts duplicados ambiguos en {path.name}: "
+                f"tag={duplicate_group.iloc[0]['tag']}, "
+                f"contextID={duplicate_group.iloc[0]['contextID']}, "
+                f"valores={duplicate_group['valor_ytd_o_stock'].tolist()}"
+            )
+
+    facts = pd.DataFrame(deduplicated_rows)
+
+    for variable, preferred_tag in PREFERRED_TAGS.items():
+        variable_facts = facts[facts["variable"] == variable]
+        if preferred_tag in set(variable_facts["tag"]):
+            facts = facts[
+                (facts["variable"] != variable)
+                | (facts["tag"] == preferred_tag)
+            ]
+
+    counts = facts.groupby("variable").size()
+    required_variables = set(FLOW_TAGS.values()) | set(STOCK_TAGS.values())
+    missing = sorted(required_variables - set(counts.index))
     duplicated = sorted(counts[counts != 1].index.tolist())
     if missing or duplicated:
         raise ValueError(
@@ -196,7 +261,36 @@ def extract_isa_facts(
     ).reset_index(drop=True)
 
 
-def build_isa_panel(facts: pd.DataFrame) -> pd.DataFrame:
+def extract_issuer_facts(
+    data_dir: str | Path,
+    issuer: str,
+    pattern: str = "*.xbrl",
+) -> pd.DataFrame:
+    """Extrae los facts seleccionados de un emisor con la configuracion comun."""
+
+    paths = [
+        path
+        for path in sorted(Path(data_dir).glob(pattern))
+        if _is_valid_period_path(path)
+    ]
+    if not paths:
+        return pd.DataFrame()
+
+    controller = Cntlr.Cntlr()
+    try:
+        frames = [
+            extract_selected_facts(path, controller, issuer)
+            for path in paths
+        ]
+    finally:
+        controller.close()
+
+    return pd.concat(frames, ignore_index=True).sort_values(
+        ["periodo", "tag"]
+    ).reset_index(drop=True)
+
+
+def build_panel(facts: pd.DataFrame) -> pd.DataFrame:
     """Construye el panel base: flujos trimestrales y stocks al cierre.
 
     Los flujos se convierten de YTD a trimestre mediante diferencias dentro de
@@ -208,7 +302,11 @@ def build_isa_panel(facts: pd.DataFrame) -> pd.DataFrame:
     if missing:
         raise ValueError(f"Faltan columnas requeridas: {sorted(missing)}")
 
-    ytd = facts.pivot(index="periodo", columns="variable", values="valor_ytd_o_stock").sort_index()
+    ytd = facts.pivot(
+        index=["emisor", "periodo"],
+        columns="variable",
+        values="valor_ytd_o_stock",
+    ).sort_index()
     panel = pd.DataFrame(index=ytd.index)
 
     flow_variables = [
@@ -220,13 +318,19 @@ def build_isa_panel(facts: pd.DataFrame) -> pd.DataFrame:
     for variable in flow_variables:
         if variable not in ytd:
             raise ValueError(f"Falta el flujo requerido: {variable}")
+        years = ytd.index.get_level_values("periodo").str[:4]
+        issuers = ytd.index.get_level_values("emisor")
         panel[variable] = ytd[variable].groupby(
-            ytd.index.to_series().str[:4]
+            [issuers, years],
         ).diff()
-        first_periods = ytd.index.to_series().groupby(
-            ytd.index.to_series().str[:4]
-        ).first()
-        for first_period in first_periods:
+        group_keys = pd.MultiIndex.from_arrays([issuers, years])
+        first_positions = (
+            pd.Series(range(len(ytd)), index=group_keys)
+            .groupby(level=[0, 1])
+            .first()
+        )
+        for first_position in first_positions.astype(int):
+            first_period = ytd.index[first_position]
             panel.loc[first_period, variable] = ytd.loc[first_period, variable]
 
     for variable in ["caja", "deuda_cp", "deuda_lp"]:
@@ -235,7 +339,6 @@ def build_isa_panel(facts: pd.DataFrame) -> pd.DataFrame:
         panel[variable] = ytd[variable]
 
     panel["ebitda"] = panel["resultado_operativo"] + panel["d_and_a"]
-    panel["emisor"] = "ISA"
     panel = panel.reset_index()
     return panel[
         [
@@ -249,6 +352,12 @@ def build_isa_panel(facts: pd.DataFrame) -> pd.DataFrame:
             "ingresos",
         ]
     ]
+
+
+def build_isa_panel(facts: pd.DataFrame) -> pd.DataFrame:
+    """Compatibilidad con el nombre historico de la funcion para ISA."""
+
+    return build_panel(facts)
 
 
 if __name__ == "__main__":
