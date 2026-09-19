@@ -26,6 +26,20 @@ def main():
             print(f"  → sin archivos XBRL válidos; se omite")
             continue
         print(f"  → {len(records)} periodos encontrados")
+        expected_variables = {
+            "ingresos", "gastos_financieros", "resultado_operativo",
+            "d_and_a", "caja", "deuda_cp", "deuda_lp",
+        }
+        available = records.groupby(["emisor", "periodo"])["variable"].agg(set)
+        missing = {
+            f"{issuer} {period}: {sorted(expected_variables - variables)}"
+            for (issuer_name, period), variables in available.items()
+            if (expected_variables - variables)
+        }
+        if missing:
+            print("  → faltantes (se conservarán como NaN):")
+            for item in sorted(missing):
+                print(f"     {item}")
         all_records.append(records)
 
     panel = build_panel(pd.concat(all_records, ignore_index=True))

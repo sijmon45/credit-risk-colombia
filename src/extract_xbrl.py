@@ -58,10 +58,13 @@ STOCK_TAGS = {
 
 TAG_ALIASES = {
     "ifrs:CurrentBorrowingsAndCurrentPortionOfNoncurrentBorrowings": "deuda_cp",
+    "co-sfc-core:ObligacionesFinancierasCorrientes": "deuda_cp",
+    "co-sfc-core:ObligacionesFinancierasNoCorrientes": "deuda_lp",
 }
 
 PREFERRED_TAGS = {
-    "deuda_cp": "ifrs:CurrentBorrowingsAndCurrentPortionOfNoncurrentBorrowings",
+    "deuda_cp": "co-sfc-core:ObligacionesFinancierasCorrientes",
+    "deuda_lp": "ifrs:LongtermBorrowings",
 }
 
 TAG_TO_VARIABLE = {**FLOW_TAGS, **STOCK_TAGS, **TAG_ALIASES}
@@ -135,6 +138,7 @@ def extract_selected_facts(
     file_path: str | Path,
     controller: Any | None = None,
     issuer: str = "ISA",
+    strict: bool = True,
 ) -> pd.DataFrame:
     """Extrae un fact consolidado seleccionable por tag desde un archivo.
 
@@ -224,11 +228,29 @@ def extract_selected_facts(
                 | (facts["tag"] == preferred_tag)
             ]
 
+    if "d_and_a" not in set(facts["variable"]):
+        components = facts[facts["variable"].isin(["depreciacion", "amortizacion"])]
+        if set(components["variable"]) == {"depreciacion", "amortizacion"}:
+            depreciation = components[components["variable"] == "depreciacion"]
+            amortisation = components[components["variable"] == "amortizacion"]
+            if len(depreciation) == 1 and len(amortisation) == 1:
+                derived = depreciation.iloc[0].copy()
+                derived["tag"] = "derived:DepreciationAndAmortisationExpense"
+                derived["variable"] = "d_and_a"
+                derived["valor_ytd_o_stock"] = (
+                    depreciation.iloc[0]["valor_ytd_o_stock"]
+                    + amortisation.iloc[0]["valor_ytd_o_stock"]
+                )
+                facts = pd.concat([facts, pd.DataFrame([derived])], ignore_index=True)
+
     counts = facts.groupby("variable").size()
-    required_variables = set(FLOW_TAGS.values()) | set(STOCK_TAGS.values())
+    required_variables = (
+        set(FLOW_TAGS.values())
+        | {"caja", "deuda_cp", "deuda_lp"}
+    )
     missing = sorted(required_variables - set(counts.index))
     duplicated = sorted(counts[counts != 1].index.tolist())
-    if missing or duplicated:
+    if strict and (missing or duplicated):
         raise ValueError(
             f"Seleccion invalida en {path.name}: missing={missing}, duplicated={duplicated}."
         )
@@ -265,6 +287,7 @@ def extract_issuer_facts(
     data_dir: str | Path,
     issuer: str,
     pattern: str = "*.xbrl",
+    strict: bool = False,
 ) -> pd.DataFrame:
     """Extrae los facts seleccionados de un emisor con la configuracion comun."""
 
@@ -279,7 +302,7 @@ def extract_issuer_facts(
     controller = Cntlr.Cntlr()
     try:
         frames = [
-            extract_selected_facts(path, controller, issuer)
+            extract_selected_facts(path, controller, issuer, strict=strict)
             for path in paths
         ]
     finally:
