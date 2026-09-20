@@ -1,36 +1,50 @@
+"""Aplica ajustes de unidades e imputaciones al panel consolidado."""
+
 import pandas as pd
-import numpy as np
+
 
 def clean_panel(path_in: str, path_out: str) -> pd.DataFrame:
+    """Limpia el panel y guarda una copia lista para el analisis.
+
+    Los ajustes conservan la logica historica del proyecto: ISAGEN se escala
+    a miles de COP, EPM completa EBITDA faltante con su media reciente y ENEL
+    completa EBITDA usando su margen observado.
+    """
+
     df = pd.read_csv(path_in)
-    num_cols = ["ebitda", "deuda_cp", "deuda_lp",
-                "gastos_financieros", "caja", "ingresos"]
+    numeric_columns = [
+        "ebitda",
+        "deuda_cp",
+        "deuda_lp",
+        "gastos_financieros",
+        "caja",
+        "ingresos",
+    ]
 
-    # --- Fix 1: normalizar unidades de ISAGEN a miles COP ---
-    df.loc[df["emisor"] == "ISAGEN", num_cols] /= 1000
+    # ISAGEN reporta estas magnitudes en unidades distintas al resto del panel.
+    df.loc[df["emisor"] == "ISAGEN", numeric_columns] /= 1000
 
-    # --- Fix 2: imputar EPM 2026Q1-Q2 con promedio últimos 4 trimestres ---
+    # Completa EBITDA faltante de EPM con la media de sus cuatro datos previos.
     epm_hist = df[(df["emisor"] == "EPM") & (df["ebitda"].notna())]
     epm_mean_ebitda = epm_hist.tail(4)["ebitda"].mean()
     df.loc[(df["emisor"] == "EPM") & (df["ebitda"].isna()), "ebitda"] = epm_mean_ebitda
 
-    # --- Fix 3: imputar EBITDA faltante de ENEL con su propio margen ---
+    # Completa EBITDA faltante de ENEL con su margen EBITDA medio observado.
     enel_mask = df["emisor"] == "ENEL"
     enel = df[enel_mask].copy()
 
-    # Margen de los periodos con dato real
     enel_obs = enel[enel["ebitda"].notna()]
     enel_margen = (enel_obs["ebitda"] / enel_obs["ingresos"]).mean()
 
     print(f"Margen EBITDA propio de ENEL ({len(enel_obs)} periodos observados): {enel_margen:.2%}")
 
-    # Imputar solo donde falta
+    # Marca unicamente los valores de EBITDA que se completan en esta etapa.
     df.loc[enel_mask, "ebitda_imputado"] = df.loc[enel_mask, "ebitda"].isna()
     df.loc[enel_mask & df["ebitda"].isna(), "ebitda"] = (
         df.loc[enel_mask & df["ebitda"].isna(), "ingresos"] * enel_margen
     )
 
-    # Para los demás emisores, ebitda_imputado = False
+    # Para los demas emisores, no se ha aplicado imputacion en esta etapa.
     df["ebitda_imputado"] = df["ebitda_imputado"].fillna(False)
     df.to_csv(path_out, index=False)
     print(f"Panel limpio guardado en: {path_out}")

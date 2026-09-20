@@ -1,10 +1,11 @@
-"""Extraccion reproducible de variables financieras desde XBRL de ISA.
+"""Extraccion reproducible de variables financieras desde archivos XBRL.
 
 La seleccion se basa en los contextos validados en la exploracion:
 - flujos: fact consolidado sin dimensiones, acumulado desde el 1 de enero;
 - stocks: fact consolidado sin dimensiones, instantaneo al cierre del trimestre.
 
-Este modulo no calcula ratios ni modelos de riesgo.
+El modulo funciona para cualquier emisor que use estos conceptos y contextos.
+No calcula ratios ni modelos de riesgo.
 """
 
 from __future__ import annotations
@@ -77,6 +78,8 @@ _DATE_PATTERN = re.compile(r"_(?P<date>\d{4}-\d{2}-\d{2})\.xbrl$")
 
 
 def _context_dimensions(context: Any) -> str:
+    """Devuelve las dimensiones del contexto en un formato legible."""
+
     return "; ".join(
         f"{dimension}={dimension_value.memberQname}"
         for dimension, dimension_value in context.qnameDims.items()
@@ -94,6 +97,8 @@ def _period_from_path(path: Path) -> str:
 
 
 def _is_valid_period_path(path: Path) -> bool:
+    """Indica si el nombre del archivo contiene un periodo trimestral valido."""
+
     try:
         _period_from_path(path)
     except ValueError:
@@ -117,6 +122,8 @@ def _fact_row(
     source_file: Path,
     issuer: str,
 ) -> dict[str, Any]:
+    """Convierte un fact seleccionado en una fila del resultado tabular."""
+
     context = fact.context
     return {
         "emisor": issuer,
@@ -140,11 +147,11 @@ def extract_selected_facts(
     issuer: str = "ISA",
     strict: bool = True,
 ) -> pd.DataFrame:
-    """Extrae un fact consolidado seleccionable por tag desde un archivo.
+    """Extrae facts consolidados seleccionables por tag desde un archivo.
 
     Los facts dimensionales se excluyen. Para flujos se requiere un contexto
     de duracion que empiece el 1 de enero; para stocks, un contexto instantaneo
-    con ``CierreTrimestreActual``.
+    cuyo cierre coincida con la fecha reportada en el nombre del archivo.
     """
 
     path = Path(file_path)
@@ -262,7 +269,11 @@ def extract_isa_facts(
     data_dir: str | Path,
     pattern: str = "*Q[1-4]_*.xbrl",
 ) -> pd.DataFrame:
-    """Extrae los facts seleccionados de todos los archivos ISA del directorio."""
+    """Extrae facts de ISA manteniendo la API historica del proyecto.
+
+    Para nuevos emisores se recomienda usar :func:`extract_issuer_facts`, que
+    recibe el nombre del emisor de forma explicita.
+    """
 
     paths = [
         path
@@ -289,7 +300,7 @@ def extract_issuer_facts(
     pattern: str = "*.xbrl",
     strict: bool = False,
 ) -> pd.DataFrame:
-    """Extrae los facts seleccionados de un emisor con la configuracion comun."""
+    """Extrae los facts seleccionados de todos los archivos de un emisor."""
 
     paths = [
         path
@@ -316,8 +327,9 @@ def extract_issuer_facts(
 def build_panel(facts: pd.DataFrame) -> pd.DataFrame:
     """Construye el panel base: flujos trimestrales y stocks al cierre.
 
-    Los flujos se convierten de YTD a trimestre mediante diferencias dentro de
-    ISA. EBITDA usa el concepto agregado D&A validado en la exploracion.
+    Los flujos YTD se convierten a valores trimestrales mediante diferencias
+    dentro de cada emisor y ano. EBITDA usa el concepto agregado D&A validado
+    en la exploracion.
     """
 
     required = {"periodo", "variable", "valor_ytd_o_stock"}
@@ -378,15 +390,20 @@ def build_panel(facts: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_isa_panel(facts: pd.DataFrame) -> pd.DataFrame:
-    """Compatibilidad con el nombre historico de la funcion para ISA."""
+    """Compatibilidad con el nombre historico de la funcion para ISA.
+
+    La implementacion es comun a todos los emisores; el nombre se conserva
+    porque forma parte de la API usada por el README y trabajos anteriores.
+    """
 
     return build_panel(facts)
 
 
 if __name__ == "__main__":
     project_root = Path(__file__).resolve().parents[1]
-    isa_dir = project_root / "Data" / "raw" / "ISA"
-    all_files = sorted(isa_dir.glob("*.xbrl"))
+    issuer = "ISA"
+    issuer_dir = project_root / "Data" / "raw" / issuer
+    all_files = sorted(issuer_dir.glob("*.xbrl"))
     valid_files = [
         file for file in all_files if _is_valid_period_path(file)
     ]
@@ -397,10 +414,15 @@ if __name__ == "__main__":
         for file in excluded_files:
             print(f"- {file.name}")
 
-    isa_facts = extract_isa_facts(isa_dir, pattern="*.xbrl")
-    isa_panel = build_isa_panel(isa_facts)
+    issuer_facts = extract_issuer_facts(
+        issuer_dir,
+        issuer,
+        pattern="*.xbrl",
+        strict=True,
+    )
+    issuer_panel = build_panel(issuer_facts)
     output_path = project_root / "Data" / "processed" / "isa_panel.csv"
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    isa_panel.to_csv(output_path, index=False)
-    print(isa_panel.to_string(index=False))
+    issuer_panel.to_csv(output_path, index=False)
+    print(issuer_panel.to_string(index=False))
     print(f"Panel guardado en: {output_path}")
