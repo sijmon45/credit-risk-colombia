@@ -22,8 +22,10 @@ credit-risk-colombia/
 │   │   ├── CELSIA/
 │   │   └── ENEL/
 │   └── processed/
+|		├── isa_panel.csv      # Panel preliminar de exploración 
 │       ├── panel_limpio.csv   # Panel trimestral limpio (insumo del notebook)
 │       └── tabla_resumen.csv  # Resultados del último periodo (output)
+|
 ├── src/
 │   ├── extract_xbrl.py        # Extracción y construcción del panel desde XBRL
 │   └── clean_panel.py         # Correcciones de unidades e imputación de EBITDA
@@ -36,6 +38,7 @@ credit-risk-colombia/
 │   ├── grafico3_stress.png
 │   ├── grafico4_heatmap.png
 |	└── tabla_resumen.csv
+├── Video_explicativo.mp4
 └── README.md
 ```
 
@@ -53,7 +56,7 @@ Python 3.10 o superior recomendado.
 
 ### 2. Descargar los archivos XBRL
 
-Los archivos se obtienen del [RNVE de la Superfinanciera](https://www.superfinanciera.gov.co/jsp/loader.jsf?lServicio=PublicacionesPortal&lTipo=publicaciones&lFuncion=loadContenidoPublicacion&id=61491).
+Los archivos se obtienen del [RNVE de la Superfinanciera](https://www.superfinanciera.gov.co/SIMEV2/rnve).
 
 Por cada emisor, buscar "Informes financieros bajo NIIF y anexos", seleccionar el formato XBRL y descargar los reportes trimestrales disponibles. Guardarlos en la carpeta `Data/raw/<EMISOR>/` con el formato de nombre `<AÑO>Q<TRIMESTRE>_<FECHA-CIERRE>.xbrl` (por ejemplo, `2023Q2_2023-06-30.xbrl`).
 
@@ -164,8 +167,7 @@ Los choques se aplican sobre el último periodo disponible de cada emisor usando
 ## Fuentes
 
 - Superintendencia Financiera de Colombia — [RNVE](https://www.superfinanciera.gov.co)
-- Taxonomía XBRL NIIF Colombia — [SFC XBRL](https://www.superfinanciera.gov.co/xbrl)
-- Arelle XBRL processor — [arelle.org](https://arelle.org)
 
-## Video explicativo
-(https://link-aqui)
+## Presentación del video
+
+[Claude Artifact](https://claude.ai/artifact/Uutxdg4qytPqpHBvhMwq4H)
